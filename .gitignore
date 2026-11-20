@@ -1,0 +1,15 @@
+build/
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.packages
+.pub-cache/
+.pub/
+pubspec.lock
+android/
+ios/
+*.iml
+.idea/
+google-services.json
+*.jks
+key.properties
