@@ -142,3 +142,58 @@ begin
 end $$;
 revoke execute on function public.tc_mark_read(uuid) from public, anon;
 grant execute on function public.tc_mark_read(uuid) to authenticated;
+
+-- ---- Photos and videos (added later) ----
+alter table public.tc_messages add column if not exists media_path text;
+alter table public.tc_messages add column if not exists media_type text
+  check (media_type in ('image', 'video'));
+
+alter table public.tc_messages drop constraint if exists tc_messages_body_check;
+alter table public.tc_messages add constraint tc_messages_body_check
+  check (char_length(body) <= 4000 and (char_length(body) >= 1 or media_path is not null));
+alter table public.tc_messages add constraint tc_messages_media_pair
+  check ((media_path is null) = (media_type is null));
+
+drop policy if exists tc_messages_insert on public.tc_messages;
+create policy tc_messages_insert on public.tc_messages for insert to authenticated
+  with check (
+    sender_id = (select auth.uid())
+    and (media_path is null or media_path like chat_id::text || '/%')
+    and exists (select 1 from public.tc_chats c
+                where c.id = tc_messages.chat_id
+                  and (select auth.uid()) in (c.user_a, c.user_b))
+  );
+
+create or replace function public.tc_touch_chat() returns trigger
+language plpgsql security definer set search_path = '' as $$
+begin
+  update public.tc_chats
+     set last_message = case
+           when new.body <> '' then new.body
+           when new.media_type = 'image' then 'Photo'
+           when new.media_type = 'video' then 'Video'
+           else ''
+         end,
+         last_time = new.created_at
+   where id = new.chat_id;
+  return new;
+end $$;
+revoke execute on function public.tc_touch_chat() from public, anon, authenticated;
+
+insert into storage.buckets (id, name, public, file_size_limit, allowed_mime_types)
+values ('tc-media', 'tc-media', false, 52428800,
+        array['image/jpeg','image/png','image/webp','image/gif','image/heic','image/heif',
+              'video/mp4','video/quicktime','video/webm','video/3gpp','video/x-matroska'])
+on conflict (id) do nothing;
+
+create policy tc_media_select on storage.objects for select to authenticated
+  using (bucket_id = 'tc-media' and exists (
+    select 1 from public.tc_chats c
+    where c.id::text = (storage.foldername(name))[1]
+      and (select auth.uid()) in (c.user_a, c.user_b)));
+
+create policy tc_media_insert on storage.objects for insert to authenticated
+  with check (bucket_id = 'tc-media' and exists (
+    select 1 from public.tc_chats c
+    where c.id::text = (storage.foldername(name))[1]
+      and (select auth.uid()) in (c.user_a, c.user_b)));

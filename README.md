@@ -37,6 +37,11 @@ access to the repo. Make it public to share the download link.
 
 Install on a phone: download the APK, allow "install unknown apps", open it.
 
+## Features
+
+- Each message shows how long ago it was sent; your messages also show "Seen 3 min ago" once the other person has opened the chat.
+- Send photos and videos from the paperclip button (up to 50 MB each). Files are private to the two people in the chat.
+
 ## Notes
 
 - The Supabase URL and publishable key in `lib/main.dart` are public-by-design

@@ -1,9 +1,30 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
 
 import '../main.dart';
+import 'media_widgets.dart';
+
+const maxMediaBytes = 50 * 1024 * 1024; // matches the 50 MB bucket limit
+
+const _mimeByExt = {
+  'jpg': 'image/jpeg',
+  'jpeg': 'image/jpeg',
+  'png': 'image/png',
+  'webp': 'image/webp',
+  'gif': 'image/gif',
+  'heic': 'image/heic',
+  'heif': 'image/heif',
+  'mp4': 'video/mp4',
+  'mov': 'video/quicktime',
+  'webm': 'video/webm',
+  '3gp': 'video/3gpp',
+  'mkv': 'video/x-matroska',
+};
 
 /// "just now", "5 min ago", "3 h ago", "2 d ago". Older than a week: a date.
 String timeAgo(DateTime t) {
@@ -39,9 +60,11 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
       .order('created_at', ascending: false)
       .limit(200);
 
+  final _picker = ImagePicker();
   Timer? _ticker;
   bool _foreground = true;
   bool _marking = false;
+  bool _uploading = false;
 
   @override
   void initState() {
@@ -98,6 +121,87 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
     }
   }
 
+  void _snack(String msg) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+  }
+
+  Future<void> _attach() async {
+    final kind = await showModalBottomSheet<String>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.photo_outlined),
+              title: const Text('Photo'),
+              onTap: () => Navigator.pop(ctx, 'image'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.videocam_outlined),
+              title: const Text('Video'),
+              onTap: () => Navigator.pop(ctx, 'video'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (kind == null) return;
+    try {
+      final XFile? file = kind == 'image'
+          ? await _picker.pickImage(
+              source: ImageSource.gallery, imageQuality: 85, maxWidth: 2048)
+          : await _picker.pickVideo(source: ImageSource.gallery);
+      if (file == null) return;
+      await _sendMedia(file, kind);
+    } catch (e) {
+      _snack('Could not open your gallery: $e');
+    }
+  }
+
+  String _extension(String name, String kind) {
+    final dot = name.lastIndexOf('.');
+    var e = dot < 0 ? '' : name.substring(dot + 1).toLowerCase();
+    e = e.replaceAll(RegExp(r'[^a-z0-9]'), '');
+    if (e.isEmpty || e.length > 5) e = kind == 'image' ? 'jpg' : 'mp4';
+    return e;
+  }
+
+  Future<void> _sendMedia(XFile file, String kind) async {
+    final size = await file.length();
+    if (size > maxMediaBytes) {
+      _snack('That file is too big. The limit is 50 MB.');
+      return;
+    }
+    if (!mounted) return;
+    setState(() => _uploading = true);
+    final ext = _extension(file.name, kind);
+    final mime = _mimeByExt[ext] ?? (kind == 'image' ? 'image/jpeg' : 'video/mp4');
+    final path = '${widget.chatId}/${DateTime.now().microsecondsSinceEpoch}.$ext';
+    try {
+      await db.storage.from(mediaBucket).upload(
+            path,
+            File(file.path),
+            fileOptions: FileOptions(contentType: mime),
+          );
+      // Anything typed in the box is sent as the caption.
+      final caption = _controller.text.trim();
+      await db.from('tc_messages').insert({
+        'chat_id': widget.chatId,
+        'sender_id': _meId,
+        'body': caption,
+        'media_path': path,
+        'media_type': kind,
+      });
+      _controller.clear();
+    } catch (e) {
+      _snack('Could not send the ${kind == 'image' ? 'photo' : 'video'}: $e');
+    } finally {
+      if (mounted) setState(() => _uploading = false);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
@@ -138,7 +242,10 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                     final mine = m['sender_id'] == _meId;
                     final sent = _parse(m['created_at']);
                     final seen = _parse(m['read_at']);
+                    final mediaPath = m['media_path'] as String?;
+                    final body = m['body'] as String? ?? '';
                     return Align(
+                      key: ValueKey(m['id']),
                       alignment:
                           mine ? Alignment.centerRight : Alignment.centerLeft,
                       child: Container(
@@ -156,7 +263,16 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.end,
                           children: [
-                            Text(m['body'] as String? ?? ''),
+                            if (mediaPath != null)
+                              Padding(
+                                padding: EdgeInsets.only(
+                                    bottom: body.isEmpty ? 0 : 6),
+                                child: MediaThumb(
+                                  path: mediaPath,
+                                  type: (m['media_type'] as String?) ?? 'image',
+                                ),
+                              ),
+                            if (body.isNotEmpty) Text(body),
                             const SizedBox(height: 2),
                             if (sent != null)
                               Text(
@@ -185,11 +301,17 @@ class _ChatScreenState extends State<ChatScreen> with WidgetsBindingObserver {
               },
             ),
           ),
+          if (_uploading) const LinearProgressIndicator(minHeight: 3),
           SafeArea(
             child: Padding(
               padding: const EdgeInsets.fromLTRB(8, 4, 8, 8),
               child: Row(
                 children: [
+                  IconButton(
+                    tooltip: 'Send a photo or video',
+                    onPressed: _uploading ? null : _attach,
+                    icon: const Icon(Icons.attach_file),
+                  ),
                   Expanded(
                     child: TextField(
                       controller: _controller,
