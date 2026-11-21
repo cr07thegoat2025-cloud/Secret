@@ -120,3 +120,25 @@ grant execute on function public.tc_start_chat(uuid) to authenticated;
 
 alter publication supabase_realtime add table public.tc_messages;
 alter publication supabase_realtime add table public.tc_chats;
+
+-- ---- Read receipts (added later) ----
+alter table public.tc_messages add column if not exists read_at timestamptz;
+
+create or replace function public.tc_mark_read(p_chat uuid) returns void
+language plpgsql security definer set search_path = '' as $$
+begin
+  if auth.uid() is null then raise exception 'not signed in'; end if;
+  if not exists (
+    select 1 from public.tc_chats c
+    where c.id = p_chat and auth.uid() in (c.user_a, c.user_b)
+  ) then
+    raise exception 'not a member of this chat';
+  end if;
+  update public.tc_messages
+     set read_at = now()
+   where chat_id = p_chat
+     and sender_id <> auth.uid()
+     and read_at is null;
+end $$;
+revoke execute on function public.tc_mark_read(uuid) from public, anon;
+grant execute on function public.tc_mark_read(uuid) to authenticated;
