@@ -197,3 +197,46 @@ create policy tc_media_insert on storage.objects for insert to authenticated
     select 1 from public.tc_chats c
     where c.id::text = (storage.foldername(name))[1]
       and (select auth.uid()) in (c.user_a, c.user_b)));
+
+-- ---- Voice notes (added later, used by Histagram) ----
+do $$
+declare c record;
+begin
+  for c in
+    select conname from pg_constraint
+    where conrelid = 'public.tc_messages'::regclass and contype = 'c'
+      and pg_get_constraintdef(oid) ilike '%media_type%' and conname <> 'tc_messages_media_pair'
+  loop
+    execute format('alter table public.tc_messages drop constraint %I', c.conname);
+  end loop;
+end $$;
+
+alter table public.tc_messages add constraint tc_messages_media_type_check
+  check (media_type in ('image', 'video', 'audio'));
+
+alter table public.tc_messages add column if not exists media_ms integer
+  check (media_ms is null or media_ms between 0 and 3600000);
+
+create or replace function public.tc_touch_chat() returns trigger
+language plpgsql security definer set search_path = '' as $$
+begin
+  update public.tc_chats
+     set last_message = case
+           when new.body <> '' then new.body
+           when new.media_type = 'image' then 'Photo'
+           when new.media_type = 'video' then 'Video'
+           when new.media_type = 'audio' then 'Voice message'
+           else ''
+         end,
+         last_time = new.created_at
+   where id = new.chat_id;
+  return new;
+end $$;
+revoke execute on function public.tc_touch_chat() from public, anon, authenticated;
+
+update storage.buckets
+   set allowed_mime_types = array[
+     'image/jpeg','image/png','image/webp','image/gif','image/heic','image/heif',
+     'video/mp4','video/quicktime','video/webm','video/3gpp','video/x-matroska',
+     'audio/mp4','audio/aac','audio/x-m4a','audio/m4a','audio/mpeg','audio/ogg','audio/webm','audio/3gpp','audio/wav']
+ where id = 'tc-media';
