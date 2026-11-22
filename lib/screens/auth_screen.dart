@@ -20,6 +20,22 @@ class _AuthScreenState extends State<AuthScreen> {
   bool _hide = true;
   String? _error;
   String? _info;
+  String? _resendEmail; // set after sign-up when the email needs confirming
+
+  Future<void> _resend() async {
+    final email = _resendEmail;
+    if (email == null) return;
+    try {
+      await db.auth.resend(type: OtpType.signup, email: email);
+      setState(() {
+        _error = null;
+        _info = 'Confirmation email sent again. It can take a minute. '
+            'Check your spam folder too.';
+      });
+    } on AuthException catch (e) {
+      setState(() => _error = _friendly(e));
+    }
+  }
 
   @override
   void dispose() {
@@ -44,12 +60,23 @@ class _AuthScreenState extends State<AuthScreen> {
           password: _password.text,
           data: {'name': _name.text.trim()},
         );
-        if (res.session == null) {
+        // An empty identities list means this email already has an account.
+        // Supabase sends no email in that case, so tell the person why.
+        final identities = res.user?.identities;
+        if (identities != null && identities.isEmpty) {
+          setState(() {
+            _signUp = false;
+            _error = 'That email already has an account, so no new email was '
+                'sent. Log in, or tap "Forgot password?" to reset it.';
+          });
+        } else if (res.session == null) {
           // Email confirmation is switched on in Supabase.
           setState(() {
             _signUp = false;
-            _info = 'Account created. Check your email to confirm it, '
-                'then log in.';
+            _resendEmail = email;
+            _info = 'Account created. We sent a confirmation email to $email. '
+                'Open the link in it, then log in. Check your spam folder if '
+                'you can\'t find it.';
           });
         }
       } else {
@@ -91,7 +118,9 @@ class _AuthScreenState extends State<AuthScreen> {
       return 'Please confirm your email first (check your inbox).';
     }
     if (m.contains('password')) return 'Password must be at least 6 characters.';
-    if (m.contains('rate limit')) return 'Too many attempts. Try again later.';
+    if (m.contains('rate limit') || (m.contains('after') && m.contains('second'))) {
+      return 'Too many emails requested. Wait a minute and try again.';
+    }
     return e.message;
   }
 
@@ -175,6 +204,10 @@ class _AuthScreenState extends State<AuthScreen> {
                               child: CircularProgressIndicator(strokeWidth: 2))
                           : Text(_signUp ? 'Create account' : 'Log in'),
                     ),
+                    if (!_signUp && _resendEmail != null)
+                      TextButton(
+                          onPressed: _resend,
+                          child: const Text('Resend confirmation email')),
                     if (!_signUp)
                       TextButton(
                           onPressed: _reset,
